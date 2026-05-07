@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FuelRadar - Comparateur de Rentabilité</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root { --blue: #2563eb; --dark: #1e293b; --green: #059669; --red: #dc2626; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; background: #f1f5f9; }
+        
+        /* Barre latérale */
+        #sidebar { width: 420px; background: white; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column; box-shadow: 4px 0 15px rgba(0,0,0,0.05); z-index: 10; }
+        .header { padding: 20px; background: var(--dark); color: white; text-align: center; }
+        .config { padding: 15px; border-bottom: 1px solid #eee; background: #f8fafc; }
+        
+        /* Formulaire */
+        label { display: block; font-size: 11px; font-weight: bold; color: #64748b; margin-top: 8px; text-transform: uppercase; }
+        input, select { width: 100%; padding: 10px; margin-top: 4px; border: 1px solid #cbd5e1; border-radius: 8px; box-sizing: border-box; font-size: 14px; }
+        .btn { width: 100%; padding: 14px; background: var(--blue); color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 15px; transition: 0.2s; }
+        .btn:hover { background: #1d4ed8; }
+
+        /* Liste des stations */
+        #liste { flex: 1; overflow-y: auto; padding: 15px; }
+        .station-card { background: white; border: 2px solid #e2e8f0; padding: 15px; margin-bottom: 12px; border-radius: 12px; cursor: pointer; position: relative; transition: 0.2s; }
+        .station-card:hover { border-color: var(--blue); transform: translateY(-2px); }
+        .brand { font-size: 16px; font-weight: bold; color: var(--blue); text-transform: uppercase; display: block; margin-bottom: 5px; }
+        .price-badge { font-size: 24px; font-weight: 800; color: var(--dark); position: absolute; top: 15px; right: 15px; }
+        
+        /* Résultats de calcul */
+        .result-box { margin-top: 10px; padding: 10px; border-radius: 8px; font-size: 13px; font-weight: 600; }
+        .is-rentable { background: #dcfce7; border: 1px solid #86efac; color: #166534; }
+        .not-rentable { background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }
+        .economy { font-size: 15px; font-weight: 800; display: block; margin-bottom: 2px; }
+
+        /* Carte */
+        #map { flex: 1; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="header">
+        <h2 style="margin:0">⛽ FuelRadar Pro</h2>
+        <small>Trié par distance • Rayon 20-100km</small>
+    </div>
+    
+    <div class="config">
+        <label>📍 Ma Position (Départ)</label>
+        <input type="text" id="userAddr" value="La Réole 33190">
+        
+        <div style="display: flex; gap: 10px;">
+            <div style="flex:1">
+                <label>⛽ Carburant</label>
+                <select id="fuelType">
+                    <option value="gazole">Gazole</option>
+                    <option value="e10">SP95-E10</option>
+                    <option value="sp98">SP98</option>
+                    <option value="e85">E85 (Ethanol)</option>
+                    <option value="sp95">SP95</option>
+                </select>
+            </div>
+            <div style="flex:1">
+                <label>🚗 Conso (L/100)</label>
+                <input type="number" id="conso" value="6.5" step="0.1">
+            </div>
+        </div>
+
+        <div style="display: flex; gap: 10px;">
+            <div style="flex:1">
+                <label>💰 Prix Local (€/L)</label>
+                <input type="number" id="prixRef" value="1.95" step="0.01">
+            </div>
+            <div style="flex:1">
+                <label>⛽ Litres à prendre</label>
+                <input type="number" id="litres" value="50">
+            </div>
+        </div>
+        
+        <button class="btn" onclick="lancerCalcul()">COMPARER PAR DISTANCE</button>
+    </div>
+
+    <div id="liste">Les stations s'afficheront ici...</div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    let map = L.map('map').setView([44.582, -0.041], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    let markers = [];
+    let userMarker;
+
+    async function lancerCalcul() {
+        const addr = document.getElementById('userAddr').value;
+        const fuel = document.getElementById('fuelType').value;
+        const fuelField = fuel + "_prix";
+        const vConso = parseFloat(document.getElementById('conso').value);
+        const vLitres = parseFloat(document.getElementById('litres').value);
+        const vPrixRef = parseFloat(document.getElementById('prixRef').value);
+        const listeDiv = document.getElementById('liste');
+
+        listeDiv.innerHTML = "🔍 Recherche des stations...";
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+
+        try {
+            // 1. On trouve vos coordonnées
+            const g = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addr + ", France")}`);
+            const gData = await g.json();
+            if(!gData.length) return alert("Adresse non trouvée");
+            const uLat = parseFloat(gData[0].lat), uLon = parseFloat(gData[0].lon);
+            
+            if(userMarker) map.removeLayer(userMarker);
+            userMarker = L.marker([uLat, uLon]).addTo(map).bindPopup("<b>Départ</b>").openPopup();
+            map.setView([uLat, uLon], 11);
+
+            // 2. On cherche les stations (Rayon 50km pour rester pertinent sur la distance)
+            const url = `https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records?where=within_distance(geom%2C%20geom'POINT(${uLon}%20${uLat})'%2C%2050km)%20AND%20${fuelField}%3E0&limit=50`;
+            const r = await fetch(url);
+            const data = await r.json();
+
+            // 3. Calcul distance et rentabilité
+            const stations = data.results.map(s => {
+                const dist = (Math.sqrt((s.geom.lat - uLat)**2 + (s.geom.lon - uLon)**2) * 111);
+                const prixStation = s[fuelField];
+                
+                // Coût du trajet A/R
+                const coutTrajet = ((dist * 2) / 100) * vConso * prixStation;
+                // Gain sur le plein
+                const economiePlein = (vPrixRef - prixStation) * vLitres;
+                // Profit réel
+                const gainReel = economiePlein - coutTrajet;
+
+                return { ...s, dist, gainReel, prix: prixStation };
+            });
+
+            // 4. TRI PAR DISTANCE (Le plus proche en premier)
+            stations.sort((a, b) => a.dist - b.dist);
+
+            listeDiv.innerHTML = "";
+            stations.forEach(s => {
+                const card = document.createElement('div');
+                card.className = 'station-card';
+                const estRentable = s.gainReel > 0;
+                const enseigne = s.nom || s.marque || "Station Service";
+
+                card.innerHTML = `
+                    <div class="price-badge">${s.prix.toFixed(3)}€</div>
+                    <span class="brand">${enseigne}</span>
+                    <div style="font-size:12px; color:#64748b;">
+                        📍 ${s.ville} (<b>${s.dist.toFixed(1)} km</b>)
+                    </div>
+                    
+                    <div class="result-box ${estRentable ? 'is-rentable' : 'not-rentable'}">
+                        <span class="economy">
+                            ${estRentable ? '✅ Gain Réel : +' + s.gainReel.toFixed(2) + ' €' : '❌ Perte : ' + s.gainReel.toFixed(2) + ' €'}
+                        </span>
+                        <span>Coût du trajet A/R : ${((s.dist * 2 / 100) * vConso * s.prix).toFixed(2)}€</span>
+                    </div>
+                `;
+
+                card.onclick = () => map.flyTo([s.geom.lat, s.geom.lon], 15);
+                listeDiv.appendChild(card);
+
+                const m = L.marker([s.geom.lat, s.geom.lon]).addTo(map).bindPopup(`<b>${enseigne}</b><br>Distance: ${s.dist.toFixed(1)}km`);
+                markers.push(m);
+            });
+
+        } catch (e) {
+            listeDiv.innerHTML = "Erreur de connexion aux données nationales.";
+        }
+    }
+</script>
+</body>
+</html>
